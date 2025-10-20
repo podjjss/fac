@@ -55,7 +55,7 @@ def init_driver():
     return d
 
 def add_cookies_and_refresh(d):
-    d.get("https://app.factory.ai")
+    d.get("https://app.factory.ai/sessions")
     for k, v in cookies.items():
         try:
             d.add_cookie({"name": k, "value": v, "path": "/"})
@@ -96,7 +96,7 @@ def send_command(d, cmd):
     inp.send_keys(Keys.ENTER)
     print("[main] command sent to session")
 
-def wait_for_sshx_link(d, before_count, timeout=180):
+def wait_for_sshx_link(d, before_count, timeout=60):
     t0 = time.time()
     pattern1 = re.compile(r"(https?://sshx\.io/s/[^\s#]+#[A-Za-z0-9_-]+)")
     pattern2 = re.compile(r"(https?://sshx\.io/s/[^\s'\"<>]+)")
@@ -109,6 +109,12 @@ def wait_for_sshx_link(d, before_count, timeout=180):
                 if m:
                     print("[main] sshx link found in reply")
                     return m.group(1)
+                else:
+                    send_command(d, COMMAND)
+                    sleep(60)
+                    m1 = pattern1.search(txt) or pattern2.search(txt)
+                    if m1:
+                         return m.group(1)
         time.sleep(1)
     print("[main] no sshx link found within timeout")
     return None
